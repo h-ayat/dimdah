@@ -1,8 +1,8 @@
-# Domain-Isolated Modular Architecture (DIMDAh)
+# Domain-Isolated Modular Driver Architecture (DIMDAh)
 
 ## Preface
 
-Modern software systems have grown increasingly complex while team sizes often remain small. With the rise of intelligent coding assistants and AI agents, developers can now build systems of unprecedented scale and sophistication — but the cognitive load of understanding and safely evolving such systems has become the new bottleneck. The **Domain-Isolated Modular Architecture (DIMDAh)** aims to minimize this cognitive burden by introducing clear, enforceable boundaries between logical units of the system, allowing developers to modify, extend, or reason about a part of the system without understanding the entire codebase.
+Modern software systems have grown increasingly complex while team sizes often remain small. With the rise of intelligent coding assistants and AI agents, developers can now build systems of unprecedented scale and sophistication — but the cognitive load of understanding and safely evolving such systems has become the new bottleneck. The **Domain-Isolated Modular Driver Architecture (DIMDAh)** aims to minimize this cognitive burden by introducing clear, enforceable boundaries between logical units of the system, allowing developers to modify, extend, or reason about a part of the system without understanding the entire codebase.
 
 ### The Cognitive Load Problem
 
@@ -17,14 +17,14 @@ A well-designed architecture minimizes the "blast radius" of comprehension — w
 
 ### The AI Collaboration Challenge
 
-Despite the superb performance of AI-powered tools (like Claude) in delivering code, they exhibit a critical limitation: **the bigger the context of a codebase, the worse they perform**. This isn't just a token limit issue — it's about maintaining coherence across large, interconnected systems. When everything depends on everything else:
+Despite the impressive performance of modern AI coding assistants (such as Claude, GitHub Copilot, and others) in delivering code, they exhibit a critical limitation: **the larger and more interconnected a codebase, the harder it becomes to maintain coherence**. This isn't just about token limits — it's about reasoning across complex dependency graphs. When everything depends on everything else:
 
-- AI agents struggle to reason about side effects
-- Context windows fill with tangentially related code
-- Suggestions become less precise and more error-prone
+- AI agents struggle to reason about side effects and implicit coupling
+- Context windows fill with tangentially related code, diluting focus
+- Code suggestions become less precise and more error-prone
 - The cognitive burden shifts from human to machine, but doesn't disappear
 
-DIMDAh is designed to be AI-friendly: clear boundaries mean AI agents can understand and modify isolated units effectively, just like human developers.
+DIMDAh is designed to be AI-friendly: clear architectural boundaries mean AI agents can understand and modify isolated units effectively, just like human developers. By constraining the "blast radius" of each change, both humans and AI can work more confidently.
 
 ### The DIMDAh Approach
 
@@ -78,7 +78,7 @@ trait Metrics[F[_]] {
 }
 ```
 
-### 1. Core (Foundation) Layer
+### 1. Core (Domain) Layer
 
 This layer defines the most atomic, stable building blocks of the domain. It focuses on representing **business entities and invariant-preserving logic**.
 
@@ -210,12 +210,12 @@ Layer boundaries and access restrictions are enforced using **package-private (o
 - **Internal implementations** (DAOs, internal models, helper utilities) are package-private and inaccessible from outside
 - Higher layers interact only through public interfaces, with the compiler preventing direct access to implementation details
 
-**Example**: In the Core layer:
+**Example**: In the Core (Domain) layer:
 - `UserRepository` (interface) → **public** — accessible to Subdomain and Service layers
-- `UserDAO` (concrete implementation) → **package-private** — only accessible within Core
+- `UserDAO` (concrete implementation) → **package-private** — only accessible within Core (Domain)
 - Internal domain model constructors or validation logic → **package-private** — ensuring invariants are maintained
 
-This explains why **domain models and persistence implementations coexist in the Core layer**: they are packaged together so that visibility modifiers can enforce the abstraction boundary at compile time. Higher layers cannot bypass the repository interface to access DAOs directly.
+This explains why **domain models and persistence implementations coexist in the Core (Domain) layer**: they are packaged together so that visibility modifiers can enforce the abstraction boundary at compile time. Higher layers cannot bypass the repository interface to access DAOs directly.
 
 ### When Convention Is Required
 
@@ -949,7 +949,7 @@ Runtime topology (whether modules are deployed as microservices or as parts of a
 
 ## Summary
 
-The **Domain-Isolated Modular Architecture (DIMDAh)** provides a balance between flexibility and structure. By defining strong, semantic boundaries between kernels, contexts, and orchestrations, it allows teams — human and machine alike — to build and evolve large-scale systems without losing coherence or sanity.
+The **Domain-Isolated Modular Driver Architecture (DIMDAh)** provides a balance between flexibility and structure. By defining strong, semantic boundaries between kernels, contexts, and orchestrations, it allows teams — human and machine alike — to build and evolve large-scale systems without losing coherence or sanity.
 
 ### Core Tenets
 
@@ -963,7 +963,7 @@ The **Domain-Isolated Modular Architecture (DIMDAh)** provides a balance between
 ### Architectural Layers
 
 - **Layer 0: Infrastructure** — Cross-cutting abstractions (logging, metrics, etc.)
-- **Layer 1: Core** — Domain models, kernels, repository interfaces, DAOs
+- **Layer 1: Core (Domain)** — Domain models, kernels, repository interfaces, DAOs
 - **Layer 2: Subdomain** — Bounded contexts combining kernels into cohesive units
 - **Layer 3: Service** — Orchestration layer, represents deployment boundaries
 - **Layer 4: Interface** — External APIs and protocol handlers
@@ -1018,7 +1018,7 @@ trait TimeProvider[F[_]]
 trait IdGenerator[F[_]]
 ```
 
-### Layer 1: Core
+### Layer 1: Core (Domain)
 
 **Domain Models**:
 - Pattern: Singular noun representing the entity
@@ -1110,7 +1110,7 @@ com.example.project/
 │   ├── Logger.scala
 │   ├── Metrics.scala
 │   └── TimeProvider.scala
-├── core/
+├── domain/                               // or "core" - Domain Layer
 │   ├── user/
 │   │   ├── User.scala                    // Domain model
 │   │   ├── UserId.scala                  // Value object
@@ -1178,24 +1178,24 @@ com.example.project/
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        External World                            │
-│              (HTTP Clients, gRPC, Message Queues)                │
+│                        External World                           │
+│              (HTTP Clients, gRPC, Message Queues)               │
 └───────────────────────────┬─────────────────────────────────────┘
                             │
                             ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Layer 4: Interface                            │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
-│  │ Controllers  │  │     DTOs     │  │   Protocol   │          │
-│  │  Endpoints   │  │ View Models  │  │   Handlers   │          │
-│  └──────────────┘  └──────────────┘  └──────────────┘          │
+│                    Layer 4: Interface                           │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐           │
+│  │ Controllers  │  │     DTOs     │  │   Protocol   │           │
+│  │  Endpoints   │  │ View Models  │  │   Handlers   │           │
+│  └──────────────┘  └──────────────┘  └──────────────┘           │
 └───────────────────────────┬─────────────────────────────────────┘
                             │ Calls
                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Layer 3: Service                              │
-│                  (Orchestration Layer)                           │
-│                                                                   │
+┌────────────────────────────────────────────────────────────────┐
+│                    Layer 3: Service                            │
+│                  (Orchestration Layer)                         │
+│                                                                │
 │  ┌────────────────────┐        ┌────────────────────┐          │
 │  │  Service A         │        │  Service B         │          │
 │  │  ┌──────────────┐  │        │  ┌──────────────┐  │          │
@@ -1203,80 +1203,80 @@ com.example.project/
 │  │  │   Workflow   │  │        │  │   Workflow   │  │          │
 │  │  └──────────────┘  │        │  └──────────────┘  │          │
 │  └────────────────────┘        └────────────────────┘          │
-│           │                              │                       │
-│           │ Coordinates                  │                       │
-│           ▼                              ▼                       │
+│           │                              │                     │
+│           │ Coordinates                  │                     │
+│           ▼                              ▼                     │
 │   ┌─────────────────────────────────────────────────┐          │
-│   │      Inter-Service Communication via Events      │          │
+│   │      Inter-Service Communication via Events     │          │
 │   └─────────────────────────────────────────────────┘          │
-└───────────────────────────┬─────────────────────────────────────┘
+└───────────────────────────┬────────────────────────────────────┘
                             │ Uses
                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Layer 2: Subdomain                            │
-│                  (Bounded Contexts)                              │
-│                                                                   │
-│  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐   │
-│  │  Subdomain A   │  │  Subdomain B   │  │  Subdomain C   │   │
-│  │  ┌──────────┐  │  │  ┌──────────┐  │  │  ┌──────────┐  │   │
-│  │  │ Context  │  │  │  │ Context  │  │  │  │ Context  │  │   │
-│  │  │  Units   │  │  │  │  Units   │  │  │  │  Units   │  │   │
-│  │  └──────────┘  │  │  └──────────┘  │  │  └──────────┘  │   │
-│  │  Combines      │  │                │  │                │   │
-│  │  kernels       │  │                │  │                │   │
-│  └────────────────┘  └────────────────┘  └────────────────┘   │
-│           │                   │                   │             │
-│           │  Event Publisher  │                   │             │
-│           └───────────┬───────┴───────────────────┘             │
-└───────────────────────┼─────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│                    Layer 2: Subdomain                          │
+│                  (Bounded Contexts)                            │
+│                                                                │
+│  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐    │
+│  │  Subdomain A   │  │  Subdomain B   │  │  Subdomain C   │    │
+│  │  ┌──────────┐  │  │  ┌──────────┐  │  │  ┌──────────┐  │    │
+│  │  │ Context  │  │  │  │ Context  │  │  │  │ Context  │  │    │
+│  │  │  Units   │  │  │  │  Units   │  │  │  │  Units   │  │    │
+│  │  └──────────┘  │  │  └──────────┘  │  │  └──────────┘  │    │
+│  │  Combines      │  │                │  │                │    │
+│  │  kernels       │  │                │  │                │    │
+│  └────────────────┘  └────────────────┘  └────────────────┘    │
+│           │                   │                   │            │
+│           │  Event Publisher  │                   │            │
+│           └───────────┬───────┴───────────────────┘            │
+└───────────────────────┼────────────────────────────────────────┘
                         │ Uses
                         ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Layer 1: Core                                 │
-│                  (Domain Foundation)                             │
-│                                                                   │
+┌────────────────────────────────────────────────────────────────┐
+│                Layer 1: Core (Domain)                          │
+│                  (Domain Foundation)                           │
+│                                                                │
 │  ┌─────────────────────────────────────────────────────────┐   │
 │  │  Domain Models (User, Order, Product, ...)              │   │
-│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │   │
-│  │  │   Kernel A   │  │   Kernel B   │  │   Kernel C   │  │   │
-│  │  │ (Pure Logic) │  │ (Pure Logic) │  │ (Pure Logic) │  │   │
-│  │  └──────────────┘  └──────────────┘  └──────────────┘  │   │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │   │
+│  │  │   Kernel A   │  │   Kernel B   │  │   Kernel C   │   │   │
+│  │  │ (Pure Logic) │  │ (Pure Logic) │  │ (Pure Logic) │   │   │
+│  │  └──────────────┘  └──────────────┘  └──────────────┘   │   │
 │  └─────────────────────────────────────────────────────────┘   │
-│                                                                   │
+│                                                                │
 │  ┌─────────────────────────────────────────────────────────┐   │
-│  │  Repository Interfaces (public)                          │   │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐     │   │
-│  │  │UserRepo     │  │OrderRepo    │  │ProductRepo  │     │   │
-│  │  │(interface)  │  │(interface)  │  │(interface)  │     │   │
-│  │  └─────────────┘  └─────────────┘  └─────────────┘     │   │
+│  │  Repository Interfaces (public)                         │   │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐      │   │
+│  │  │UserRepo     │  │OrderRepo    │  │ProductRepo  │      │   │
+│  │  │(interface)  │  │(interface)  │  │(interface)  │      │   │
+│  │  └─────────────┘  └─────────────┘  └─────────────┘      │   │
 │  └─────────────────────────────────────────────────────────┘   │
-│                                                                   │
+│                                                                │
 │  ┌─────────────────────────────────────────────────────────┐   │
-│  │  DAOs (package-private implementations)                  │   │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐     │   │
-│  │  │  UserDAO    │  │  OrderDAO   │  │ ProductDAO  │     │   │
-│  │  │  (hidden)   │  │  (hidden)   │  │  (hidden)   │     │   │
-│  │  └─────────────┘  └─────────────┘  └─────────────┘     │   │
+│  │  DAOs (package-private implementations)                 │   │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐      │   │
+│  │  │  UserDAO    │  │  OrderDAO   │  │ ProductDAO  │      │   │
+│  │  │  (hidden)   │  │  (hidden)   │  │  (hidden)   │      │   │
+│  │  └─────────────┘  └─────────────┘  └─────────────┘      │   │
 │  └─────────────────────────────────────────────────────────┘   │
-│                             │                                    │
-│                             │ Persists to                        │
-│                             ▼                                    │
-│                    ┌─────────────────┐                          │
-│                    │    Database     │                          │
-│                    └─────────────────┘                          │
-└─────────────────────────────────────────────────────────────────┘
+│                             │                                  │
+│                             │ Persists to                      │
+│                             ▼                                  │
+│                    ┌─────────────────┐                         │
+│                    │    Database     │                         │
+│                    └─────────────────┘                         │
+└────────────────────────────────────────────────────────────────┘
                             │ Depends on
                             ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Layer 0: Infrastructure                       │
-│                  (Cross-Cutting Abstractions)                    │
-│                                                                   │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐       │
-│  │  Logger  │  │ Metrics  │  │ Security │  │  Tracing │       │
-│  │  (trait) │  │ (trait)  │  │ Context  │  │  (trait) │       │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘       │
-│                                                                   │
-│           All layers can depend on these abstractions            │
+│                    Layer 0: Infrastructure                      │
+│                  (Cross-Cutting Abstractions)                   │
+│                                                                 │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐         │
+│  │  Logger  │  │ Metrics  │  │ Security │  │  Tracing │         │
+│  │  (trait) │  │ (trait)  │  │ Context  │  │  (trait) │         │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────┘         │
+│                                                                 │
+│           All layers can depend on these abstractions           │
 └─────────────────────────────────────────────────────────────────┘
 
 Event Flow (Cross-Context Communication):
@@ -1326,7 +1326,7 @@ User Request
     → Interface Layer (validates, translates to domain)
     → Service Layer (orchestrates workflow)
     → Subdomain Layer (coordinates kernels)
-    → Core Layer (executes business logic, persists via repositories)
+    → Core (Domain) Layer (executes business logic, persists via repositories)
     → Infrastructure (logging, metrics)
 ```
 
@@ -1341,9 +1341,9 @@ Subdomain A changes state
 
 **3. Dependency Direction**:
 ```
-Interface → Service → Subdomain → Core → Infrastructure
-                                    ↓
-                                Database
+Interface → Service → Subdomain → Core (Domain) → Infrastructure
+                                        ↓
+                                    Database
 ```
 
 All layers can depend on Infrastructure (Layer 0), but never the reverse.

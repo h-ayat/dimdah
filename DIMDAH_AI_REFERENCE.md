@@ -17,13 +17,13 @@
 
 ## Architecture Layers
 
-### Layer 0: Infrastructure (Foundation)
+### Layer 0: Infrastructure (Support)
 - **Purpose**: Cross-cutting abstractions (logging, metrics, security, tracing)
 - **Contains**: Interfaces/traits only, no implementations
 - **Rule**: All layers can depend on this; it depends on nothing
 - **Examples**: `Logger[F[_]]`, `Metrics[F[_]]`, `TimeProvider[F[_]]`
 
-### Layer 1: Core (Domain Foundation)
+### Layer 1: Core (Domain)
 - **Purpose**: Domain models, business logic, persistence abstractions
 - **Contains**:
   - Domain Models (immutable, validated)
@@ -350,13 +350,11 @@ com.example.project/
 │   └── TimeProvider.scala
 ├── core/                    (Layer 1)
 │   ├── user/
-│   │   ├── User.scala                // Domain model (public)
-│   │   ├── UserId.scala              // Value object (public)
+│   │   ├── models.scala                // Domain model, errors, etc... (public)
 │   │   ├── UserKernel.scala          // Pure logic (public)
-│   │   ├── UserRepository.scala      // Interface (public)
-│   │   ├── UserDAO.scala             // DAO (package-private)
-│   │   ├── UserRegistered.scala      // Event (public)
-│   │   └── UserErrors.scala          // Error types (public)
+│   │   ├── UserRepo.scala      // Interface (public)
+│   │   ├── UserDao.scala             // DAO (package-private)
+│   │   ├── events.scala      // Event (public)
 │   └── order/
 │       └── ...
 ├── subdomain/               (Layer 2)
@@ -439,7 +437,7 @@ eventPublisher.emit(OrderCreated(orderId)).fork // Non-blocking
 ### Batching
 ```scala
 trait UserRepository {
-  def findById(id: UserId): IO[Nothing, Option[User]]
+  def findById(id: UserId): IO[Nothing, Option[User]] 
   def findByIds(ids: List[UserId]): IO[Nothing, Map[UserId, User]]
 }
 ```
