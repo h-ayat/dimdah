@@ -2,477 +2,318 @@
 
 **Purpose**: Quick reference for AI agents working in DIMDAh codebases. Focus on rules, patterns, and constraints.
 
+**Full specifications**:
+- Domain tier: [`dimdah.md`](./dimdah.md)
+- Error handling: [`error-handling.md`](./error-handling.md)
+- Infrastructure tier: [`infrastructure.md`](./infrastructure.md)
+- Interface tier: [`interface.md`](./interface.md)
+
+---
+
+## System Tiers
+
+| Tier | Responsibility |
+|------|---------------|
+| **Infrastructure** | Cross-cutting abstractions only (logging, metrics, security, tracing). No implementations, no business logic. |
+| **Domain** | All business logic. Organized into contexts via SET. **This reference focuses here.** |
+| **Interface** | External-facing APIs. Protocol translation only. No business logic. |
+
+Dependency direction: `Interface → Domain → Infrastructure`
+
 ---
 
 ## Core Principles
 
-1. **Minimize cognitive load** — Changes should be localized; understanding the entire codebase should not be required
-2. **Compiler over convention** — Use types, visibility modifiers, and effect systems to enforce rules
-3. **Domain errors are data** — Encode expected failures in function signatures: `IO[DomainError, Result]`
+1. **Minimize cognitive load** — Changes must be localized; understanding the whole system should never be required
+2. **Compiler over convention** — Package-private visibility and typed errors enforce rules structurally
+3. **Domain errors are data** — Encode expected failures in signatures: `IO[DomainError, Result]`
 4. **Type duplication OK, logic duplication forbidden** — Duplicate types freely to prevent coupling; never duplicate business logic
-5. **Events for cross-context communication** — Never call other contexts directly; emit events instead
-6. **Transactions respect boundaries** — Transaction scope aligns with isolation boundaries
+5. **Events for cross-context side effects** — Emit events rather than calling other contexts directly for mutations
+6. **Transactions respect boundaries** — Cross-context consistency uses Sagas, not shared transactions
 
 ---
 
-## Architecture Layers
+## Strict Encapsulation Tree (SET)
 
-### Layer 0: Infrastructure (Support)
-- **Purpose**: Cross-cutting abstractions (logging, metrics, security, tracing)
-- **Contains**: Interfaces/traits only, no implementations
-- **Rule**: All layers can depend on this; it depends on nothing
-- **Examples**: `Logger[F[_]]`, `Metrics[F[_]]`, `TimeProvider[F[_]]`
+The Domain tier is a **tree of packages**. The rule:
 
-### Layer 1: Core (Domain)
-- **Purpose**: Domain models, business logic, persistence abstractions
-- **Contains**:
-  - Domain Models (immutable, validated)
-  - Kernels (pure business logic, no I/O)
-  - Repository interfaces (public)
-  - DAOs (package-private implementations)
-  - Event Publishers
-- **Rule**:
-  - Kernels must be pure (no side effects)
-  - DAOs are package-private; only repository interfaces are public
-  - No dependencies on higher layers
-- **Examples**: `User`, `UserKernel`, `UserRepository`, `UserDAO` (hidden)
+> **A component can only be accessed by its direct parent in the tree.**
 
-### Layer 2: Subdomain (Bounded Contexts)
-- **Purpose**: Combine kernels into cohesive business capabilities
-- **Contains**:
-  - Context units (combine multiple kernels)
-  - Subdomain events
-- **Rule**:
-  - Can use multiple kernels from Core
-  - Expose narrow, intention-revealing APIs
-  - Hide internal implementation details
-  - No direct dependencies on other subdomains
-- **Examples**: `UserContext`, `OrderSubdomain`
+- No sibling access (lobes cannot call each other)
+- No skip-level access (Orch cannot reach Kernel directly, bypassing Lobe)
+- **Exception**: Port nodes are designed to be accessed from outside the context — they are the public surface
 
-### Layer 3: Service (Orchestration)
-- **Purpose**: Coordinate subdomains into workflows; deployment boundaries
-- **Contains**:
-  - Process/workflow objects
-  - Service-level orchestration
-  - Error composition
-- **Rule**:
-  - Each service = potential microservice (independently deployable)
-  - No business logic (only orchestration)
-  - Communicate with other services via events or APIs
-  - Multiple subdomains can live within one service
-- **Examples**: `CheckoutService`, `FulfillmentService`
+Enforced via **package-private visibility modifiers** at each level.
 
-### Layer 4: Interface (External APIs)
-- **Purpose**: Expose system to external world
-- **Contains**:
-  - Controllers/Endpoints
-  - DTOs, View Models
-  - Protocol handlers (HTTP, gRPC, etc.)
-- **Rule**:
-  - Translate between external protocols and domain
-  - Delegate all work to Service or Subdomain layers
-  - Never contain business logic
-- **Examples**: `UserController`, `OrderEndpoints`
+---
+
+## Domain Layers
+
+Each context in the Domain tier has four layers:
+
+### Repo
+- **Does**: Communicates with storage (DB, cache). Holds DB-level models.
+- **Can access**: Database only
+- **Cannot**: Contain business logic; be accessed by anything other than its owner Kernel
+- **Visibility**: Package-private to its Kernel's package
+
+### Kernel
+- **Does**: Maintains internal consistency of its aggregate. Translates DB models ↔ domain models. Enforces invariants.
+- **Can access**: Its own Repos only
+- **Cannot**: Talk to other Kernels, Lobes, Ports, or anything external
+- **Visibility**: Package-private to its Lobe's package (or to Orch if Lobe is collapsed)
+
+### Lobe
+- **Does**: Decision-making and business rules. Coordinates Kernels. Queries external context Ports for data.
+- **Can access**: Its own Kernels; other contexts' Ports (read/query only)
+- **Cannot**: Access Repos directly; cause cross-context mutations (that's Orch's job)
+- **Visibility**: Package-private to the context (Orch only)
+
+### Orch + Port
+- **Port**: Public interface of the context. Sealed contract. All external access goes through Port.
+- **Orch**: Implements Port. Delegates to Lobes. Manages cross-context transactions (Sagas).
+- **Can access**: Its own Lobes; other contexts' Ports
+- **Cannot**: Access own Kernels or Repos directly
+- **Visibility**: Port and Orch are public
+
+### Layer Collapsing
+
+When there is **no Lobe-level logic** (no cross-kernel decisions, no external Port queries), Lobe may be omitted — Orch calls Kernel directly. This is intentional and communicates that the context has no higher-order business rules yet.
+
+As soon as Lobe-level logic appears, reintroduce the Lobe, make Kernel package-private to it, and have Orch call Lobe instead of Kernel.
+
+---
+
+## Access Rules Summary Table
+
+| Layer | Can Access | Cannot Access | Accessed By |
+|-------|-----------|---------------|-------------|
+| **Repo** | Database | Anything else | Owner Kernel only |
+| **Kernel** | Own Repos | Other Kernels, Lobes, Ports | Owner Lobe (or Orch if collapsed) |
+| **Lobe** | Own Kernels; external Ports (read) | Repos; cross-context mutations | Context Orch |
+| **Orch** | Own Lobes; external Ports | Own Kernels, Repos | Interface tier; other Orchs |
 
 ---
 
 ## Dependency Rules
 
 ```
-Interface → Service → Subdomain → Core → Infrastructure
-                                    ↓
-                                Database
+Interface tier
+    │
+  Port (context boundary — public)
+    │
+  Orch ──► own Lobes ──► own Kernels ──► own Repos ──► DB
+    │
+  other context Ports (for reads or cross-context coordination)
 
-All layers → Infrastructure
+All tiers ──► Infrastructure (abstractions only)
 ```
 
 **NEVER**:
-- Higher layers depending on lower layer implementations (only interfaces)
-- Direct cross-subdomain calls (use events)
-- Business logic in Interface or Service layers
-- Public access to DAOs (they must be package-private)
+- Orch accessing Kernel or Repo directly (bypasses business rules)
+- Lobe mutating another context's state (use events or let Orch orchestrate)
+- Lobe accessing Repo directly (bypasses Kernel invariants)
+- Port leaking internal model types (Kernel/Repo-level)
+- Business logic in the Interface tier
 
 ---
 
 ## Error Handling Pattern
 
-### IO[E, A] Effect Type
+> Full guide: [`error-handling.md`](./error-handling.md)
 
-All business logic functions return: `IO[E, A]` where:
-- `E` = Domain error type (explicit, in signature)
-- `A` = Success type
-- Technical exceptions wrapped separately from domain errors
+All business logic returns `IO[E, A]`:
+- `E` = domain error (sealed ADT, explicit in signature)
+- `A` = success value
+- Technical exceptions travel a separate channel
 
-### Example
+### Error vocabulary per layer
+
+| Layer | Error type scope |
+|-------|-----------------|
+| Repo | Package-private (never exposed) |
+| Kernel | Package-private to Lobe; translated from Repo errors |
+| Lobe | Package-private to context; may wrap Kernel errors |
+| Port | **Public** — the error vocabulary consumers depend on |
+
+Always translate errors at boundaries. Inner error types must never leak through the Port.
+
+### Pattern
 ```scala
-// Domain errors are explicit in signature
-def registerUser(data: UserData): IO[UserRegistrationError, UserId]
+// Error types are sealed ADTs
+sealed trait UserError
+case object EmailAlreadyTaken extends UserError
+case object PlanNotAvailable  extends UserError
 
-// Error types are ADTs
-sealed trait UserRegistrationError
-case object EmailAlreadyExists extends UserRegistrationError
-case object InvalidEmailFormat extends UserRegistrationError
-case class ValidationFailed(field: String) extends UserRegistrationError
+// Domain logic returns typed errors
+def registerWithPlan(email: String, planId: PlanId): IO[UserError, UserId]
+
+// Interface tier translates to protocol
+case UserError.EmailAlreadyTaken => Response(409, "Email already in use")
 ```
-
-### Rules
-- Domain errors are **expected outcomes**, not exceptions
-- Always encode domain errors in the type signature
-- Technical failures (DB connection, network) are handled separately by the effect system
-- Callers must handle all domain error cases
 
 ---
 
 ## Event-Driven Communication
 
-### When to Use Events
-- Cross-subdomain coordination
-- Cross-service communication
-- Triggering side effects without coupling (CQRS, notifications, etc.)
+Events are used for **cross-context side effects** (e.g., updating a read model, triggering a downstream workflow). They are facts — past tense, immutable.
 
-### Pattern
 ```scala
-// ❌ WRONG: Direct call to another context
-def updateUserProfile(userId: UserId, data: ProfileData): IO[Error, Unit] =
+// ❌ Wrong: direct call from Lobe into another context's internals
+def updateProfile(id: UserId, data: ProfileData): IO[Error, Unit] =
   for {
-    _ <- userRepo.update(userId, data)
-    _ <- cqrsService.updateReadModel(userId, data)  // Violates isolation!
+    _ <- kernel.applyUpdate(id, data)
+    _ <- cqrsService.updateReadModel(id, data)  // breaks isolation
   } yield ()
 
-// ✅ CORRECT: Emit event, let other contexts react
-def updateUserProfile(userId: UserId, data: ProfileData): IO[Error, Unit] =
+// ✅ Correct: emit event; other contexts subscribe and react
+def updateProfile(id: UserId, data: ProfileData): IO[Error, Unit] =
   for {
-    _ <- userRepo.update(userId, data)
-    _ <- eventPublisher.emit(UserProfileUpdated(userId, data))
+    _ <- kernel.applyUpdate(id, data)
+    _ <- eventPublisher.emit(ProfileUpdated(id, data))
   } yield ()
-
-// Other context subscribes
-eventBus.subscribe[UserProfileUpdated] { event =>
-  cqrsRepository.updateUserReadModel(event.userId, event.data)
-}
 ```
 
-### Event Naming
-- Pattern: `<Entity><ActionInPastTense>`
-- Always past tense (facts that happened)
-- Examples: `UserRegistered`, `OrderPlaced`, `PaymentCompleted`
+**Event naming**: `<Entity><PastTenseVerb>` — `UserRegistered`, `OrderPlaced`, `PaymentCompleted`
 
-### Event Handlers
-- Must be idempotent (safe to process same event multiple times)
-- Pattern: `on<Event>` or `handle<Event>`
-- Examples: `onUserRegistered`, `handleOrderPlaced`
+**Event handlers** must be idempotent. Pattern: `on<Event>` or `handle<Event>`.
 
 ---
 
 ## Transaction Boundaries
 
-| Scope | Pattern | Use When |
-|-------|---------|----------|
-| Single kernel | Pure functions (no transaction) | All pure logic |
-| Single subdomain | Database transaction | Multiple repo calls must be atomic |
-| Multiple subdomains (same DB) | Database transaction | Shared database, strong consistency needed |
-| Multiple subdomains (separate DBs) | Events + eventual consistency | Independent databases |
-| Multiple services | Saga pattern | Distributed coordination needed |
-| Service + reliable events | Transactional outbox | Must guarantee event delivery |
+| Scope | Pattern | Consistency |
+|-------|---------|-------------|
+| Within a Kernel | DB transaction over multiple Repo calls | ACID |
+| Multiple Kernels in a Lobe (same DB) | DB transaction | ACID |
+| Cross-context (separate DBs) | Events + eventual consistency | Eventual |
+| Cross-context coordinated workflow | Saga + compensating actions (in Orch) | Eventual |
+| Reliable event delivery | Transactional outbox | Eventual + reliable |
 
-### Transactional Outbox (Reliable Events)
-```scala
-// Write event to outbox in same transaction as data change
-transactionally {
-  for {
-    _ <- userRepo.update(userId, data)
-    _ <- outboxRepo.insert(OutboxEvent("UserProfileUpdated", payload))
-  } yield ()
-}
+Cross-context transactions are **always managed by Orch**, never by Lobe.
 
-// Separate process publishes from outbox
-outboxProcessor.pollAndPublish { events =>
-  events.foreach { event =>
-    eventPublisher.emit(event.payload)
-    outboxRepo.markAsPublished(event.id)
-  }
-}
+---
+
+## Package Structure
+
+```
+context/
+  ├── Port.scala           ← public
+  ├── Orch.scala           ← public (implements Port)
+  └── lobes/
+      ├── x/
+      │   ├── XLobe.scala                  ← private[context]
+      │   └── kernels/
+      │       ├── XKernel.scala            ← private[x]
+      │       └── XRepo.scala              ← private[x]
+      └── y/
+          ├── YLobe.scala                  ← private[context]
+          └── kernels/
+              ├── a/
+              │   ├── AKernel.scala        ← private[y]
+              │   └── repos/
+              │       ├── ARepo1.scala     ← private[a]
+              │       └── ARepo2.scala     ← private[a]
+              └── b/
+                  ├── BKernel.scala        ← private[y]
+                  └── BRepo.scala          ← private[b]
 ```
 
 ---
 
 ## Naming Conventions
 
-### Domain Models
-- `User`, `Order`, `Product` (singular nouns, domain language)
-
-### Value Objects
-- `UserId`, `Email`, `Money`, `OrderStatus`
-
-### Kernels
-- `UserKernel`, `OrderKernel`, `PricingLogic`
-
-### Repositories
-- Interface: `UserRepository` (public)
-- DAO: `UserDAO` (package-private)
-
-### Errors
-- `UserNotFound`, `InsufficientBalance`, `InvalidEmailFormat`
-
-### Events
-- `UserRegistered`, `OrderPlaced`, `PaymentCompleted` (past tense)
-
-### Subdomains
-- `UserContext`, `OrderSubdomain`, `InventoryContext`
-
-### Services
-- `CheckoutService`, `FulfillmentService` (business capabilities)
-
-### Controllers
-- `UserController`, `OrderEndpoints`
-
-### DTOs
-- `UserRegistrationRequest`, `OrderSummaryResponse`
-
-### Functions
-- Kernels: `validateEmail`, `calculateTotal` (verbs)
-- Repositories: `findById`, `save`, `update` (CRUD)
-- Services: `registerUser`, `placeOrder` (business operations)
-- Event handlers: `onUserRegistered`, `handleOrderPlaced`
+| Component | Pattern | Examples |
+|-----------|---------|---------|
+| Port | `<Context>Port` or `Port` (within package) | `UserPort`, `CheckoutPort` |
+| Orch | `<Context>Orch` or `Orch` | `UserOrch`, `CheckoutOrch` |
+| Lobe | `<Domain>Lobe` | `UserLobe`, `CheckoutLobe` |
+| Kernel | `<Domain>Kernel` | `UserKernel`, `AccountKernel` |
+| Repo | `<Domain>Repo` | `UserRepo`, `AccountRepo` |
+| Domain models (Port-exposed) | Singular noun | `UserProfile`, `OrderSummary` |
+| Value objects | `<Concept>` or `<Domain><Concept>` | `UserId`, `Email`, `Money` |
+| Domain errors | `<Context><Condition>` | `EmailAlreadyTaken`, `PlanNotAvailable` |
+| Domain events | `<Entity><PastTenseVerb>` | `UserRegistered`, `OrderPlaced` |
+| Repo functions | CRUD style | `findById`, `insert`, `update`, `delete` |
+| Kernel functions | Business operation verb | `register`, `deactivate`, `applyDiscount` |
+| Lobe functions | Intent-revealing | `registerWithPlan`, `checkoutItems` |
+| Port/Orch functions | Business capability | `getProfile`, `placeOrder` |
+| Event handlers | `on<Event>` or `handle<Event>` | `onUserRegistered`, `handleOrderPlaced` |
 
 ---
 
 ## Shared Models Strategy
 
-### Internal vs Exposed Models
-- **Internal models**: Package-private, used for persistence (e.g., `UserEntity`)
-- **Exposed views**: Public, tailored to each use case (e.g., `UserProfile`, `UserSummary`)
-- **Rule**: Never expose internal models; always create views
+- **Internal models** (Repo/Kernel): package-private, never exposed outside the context
+- **Port models**: public data types returned/accepted by Port methods — the external contract
+- **Common module**: universal primitives only (`UserId`, `Email`, `Money`) — no behavior, no business rules
 
-### Common Module
-Contains universal primitives:
-- `UserId`, `Email`, `Money`, `Timestamp`, `Point`
-- **Use for**: Simple value objects with no behavior
-- **Don't use for**: Rich domain models with business rules
-
-### When to Duplicate Types
-- Different contexts need different representations
-- Coupling would force one context to accommodate another
-- Types may evolve differently
-- **Rule**: Duplicate types freely; when in doubt, duplicate
-
-### When to Share Types
-- Truly universal primitives
-- No behavior or business logic
-- Definition is stable
-
----
-
-## Visibility Modifiers (Enforcement)
-
-### Public
-- Repository interfaces
-- Exposed domain models/views
-- Subdomain APIs
-- Infrastructure abstractions
-
-### Package-Private
-- DAOs (concrete persistence implementations)
-- Internal domain model details
-- Helper utilities
-- Internal constructors/validators
-
-**Rule**: Use package-private to enforce abstraction boundaries at compile time.
+**Duplicate types freely** when contexts need different representations of the same concept. Coupling contexts through shared rich models is worse than duplication.
 
 ---
 
 ## Testing Strategy
 
-### Kernel Tests
-- Pure unit tests, no mocking
-- Test business logic in isolation
-- Fast (microseconds)
+| Layer | Test type | Dependencies |
+|-------|-----------|-------------|
+| **Repo** | Integration — real or in-memory DB | Database |
+| **Kernel** | Unit — mock Repos | Mocked Repo |
+| **Lobe** | Unit/integration — mock Kernels + mock Ports | Mocked Kernel, mocked external Ports |
+| **Orch** | Orchestration — mock Lobes + mock external Ports | Mocked Lobe, verify compensation paths |
 
-### Repository Tests
-- Integration tests with in-memory DB or testcontainers
-- Test actual persistence behavior
+**Test pyramid**: Many Kernel tests → moderate Lobe tests → few Orch tests → minimal Interface tests.
 
-### Subdomain Tests
-- Mock repositories
-- Test kernel coordination
-- Verify event emission
-
-### Service Tests
-- End-to-end workflow tests
-- Mix of real and mocked dependencies
-
-### Interface Tests
-- HTTP/gRPC contract tests
-- Mock service layer
-
-### Event Handler Tests
-- Test each handler in isolation
-- Verify idempotency
-- Mock dependencies
+**Event handlers**: Test each handler in isolation; always verify idempotency.
 
 ---
 
-## Common Anti-Patterns to Avoid
+## Common Anti-Patterns
 
-❌ **Business logic in Interface or Service layers**
-- Business rules belong in Kernels
-
-❌ **Direct cross-context calls**
-- Use events instead
-
-❌ **Public DAOs**
-- Keep them package-private
-
-❌ **Bypassing repository interfaces**
-- Always use abstractions
-
-❌ **Mutable domain models**
-- Keep them immutable
-
-❌ **Exceptions for domain errors**
-- Use `IO[DomainError, A]` pattern
-
-❌ **Global state or singletons for domain logic**
-- Use dependency injection
-
-❌ **Leaking infrastructure concerns into domain**
-- Keep kernels pure, no logging/metrics in business logic
+| Anti-pattern | Why it's wrong | Fix |
+|---|---|---|
+| Orch calling Kernel directly (when Lobe exists) | Bypasses Lobe business rules | Orch → Lobe → Kernel |
+| Lobe accessing Repo | Bypasses Kernel invariants | Lobe → Kernel → Repo |
+| Lobe mutating another context | Breaks cross-context isolation | Emit event or delegate to Orch |
+| Port exposing Kernel/Repo types | Leaks internals | Define Port-level types |
+| Using exceptions for domain errors | Callers can't handle exhaustively | Use `IO[E, A]` with sealed ADT |
+| Shared mutable state between Kernels | Creates hidden coupling | Each Kernel owns its Repos |
+| Business logic in Interface tier | Protocol and domain coupled | Move logic to Lobe |
+| Generic error types (`String`, `Throwable`) | Non-exhaustive handling | Use sealed ADT per domain |
 
 ---
 
-## Package Structure Example
+## "Where Does This Code Belong?"
 
-```
-com.example.project/
-├── infrastructure/          (Layer 0)
-│   ├── Logger.scala
-│   ├── Metrics.scala
-│   └── TimeProvider.scala
-├── core/                    (Layer 1)
-│   ├── user/
-│   │   ├── models.scala                // Domain model, errors, etc... (public)
-│   │   ├── UserKernel.scala          // Pure logic (public)
-│   │   ├── UserRepo.scala      // Interface (public)
-│   │   ├── UserDao.scala             // DAO (package-private)
-│   │   ├── events.scala      // Event (public)
-│   └── order/
-│       └── ...
-├── subdomain/               (Layer 2)
-│   ├── user/
-│   │   └── UserContext.scala
-│   └── order/
-│       └── OrderSubdomain.scala
-├── service/                 (Layer 3)
-│   ├── checkout/
-│   │   └── CheckoutService.scala
-│   └── fulfillment/
-│       └── FulfillmentService.scala
-└── interface/               (Layer 4)
-    └── http/
-        ├── UserController.scala
-        └── dto/
-            └── UserRegistrationRequest.scala
-```
+**Is it a raw DB query or persistence operation?**
+→ **Repo**
+
+**Is it an invariant check, DB-to-domain translation, or aggregate rule?**
+→ **Kernel**
+
+**Is it a business decision requiring data from outside the context, or coordinating multiple Kernels?**
+→ **Lobe**
+
+**Is it implementing the context's public API or managing a cross-context transaction?**
+→ **Orch**
+
+**Is it a cross-cutting concern (logging, metrics, tracing)?**
+→ **Infrastructure** (interface/trait only)
+
+**Is it translating domain results to HTTP/gRPC/etc., or handling auth?**
+→ **Interface tier**
 
 ---
 
-## Quick Decision Tree
+## Code Review Checklist
 
-### "Where does this code belong?"
-
-**Is it pure business logic?**
-→ Yes: Put it in a Kernel (Layer 1)
-
-**Does it coordinate multiple kernels?**
-→ Yes: Put it in a Subdomain (Layer 2)
-
-**Does it orchestrate multiple subdomains?**
-→ Yes: Put it in a Service (Layer 3)
-
-**Does it handle HTTP/external protocols?**
-→ Yes: Put it in Interface (Layer 4)
-
-**Is it a cross-cutting concern?**
-→ Yes: Put an abstraction in Infrastructure (Layer 0)
-
-### "Should this be a new subdomain or part of an existing one?"
-
-**Are they tightly coupled in the business domain?**
-→ Yes: Same subdomain
-
-**Can they have separate databases?**
-→ Yes: Separate subdomains
-
-**Would changes in one require changes in the other?**
-→ Often: Same subdomain
-
-### "Should this be a new service?"
-
-**Could it be deployed independently as a microservice?**
-→ Yes: Separate service
-
-**Does it have its own database?**
-→ Yes: Separate service
-
-**Is it loosely coupled to other services?**
-→ Yes: Separate service
-
----
-
-## Performance Optimization Patterns
-
-### CQRS
-- Write side: Normalized, transactional (Core)
-- Read side: Denormalized, optimized for queries (separate context reacting to events)
-
-### Caching
-- Add at repository boundaries using decorator pattern
-- Never in kernels
-
-### Async Event Processing
-```scala
-eventPublisher.emit(OrderCreated(orderId)).fork // Non-blocking
-```
-
-### Batching
-```scala
-trait UserRepository {
-  def findById(id: UserId): IO[Nothing, Option[User]] 
-  def findByIds(ids: List[UserId]): IO[Nothing, Map[UserId, User]]
-}
-```
-
-**Rule**: Keep business logic pure; add optimizations at architectural boundaries.
-
----
-
-## Key Reminders
-
-1. **Favor isolation over DRY** — Duplicate types to prevent coupling
-2. **Make illegal states unrepresentable** — Use types to enforce invariants
-3. **Events are facts, not commands** — Past tense, immutable
-4. **Transactions stay within boundaries** — Don't span services
-5. **Package-private is your friend** — Use it to enforce encapsulation
-6. **Kernels are pure** — No I/O, no side effects, just logic
-7. **When in doubt, add a layer of indirection** — Better isolated than coupled
-
----
-
-## Checklist for Code Reviews
-
-- [ ] Business logic is in Kernels (pure functions)
-- [ ] Domain errors are in function signatures
-- [ ] DAOs are package-private
-- [ ] No direct cross-context calls (events used instead)
-- [ ] No business logic in Interface or Service layers
-- [ ] Events are past tense, immutable
-- [ ] Repository interfaces used (not concrete DAOs)
-- [ ] Proper layer dependencies (no upward dependencies)
-- [ ] Transaction boundaries respected
-- [ ] Event handlers are idempotent
-- [ ] Naming conventions followed
-- [ ] Internal models not exposed (views used instead)
-
----
-
-**For questions or clarifications, refer to the full specification: `dimdah.md`**
+- [ ] Each layer accesses only what SET permits (see access rules table)
+- [ ] Port error types are public sealed ADTs; Kernel/Lobe errors are package-private
+- [ ] Inner layer errors are translated at each boundary — not propagated raw
+- [ ] Orch manages all cross-context transactions; Lobe does not mutate other contexts
+- [ ] Events are past tense and immutable; handlers are idempotent
+- [ ] DB-level model types do not appear outside the Repo
+- [ ] Port-exposed models are distinct from internal models
+- [ ] No business logic in Interface tier
+- [ ] Technical exceptions not used for domain outcomes
+- [ ] Layer collapsing (Lobe omitted) is justified — no Lobe-level logic exists yet
+- [ ] Naming follows conventions (Repo, Kernel, Lobe, Orch, Port suffixes)
