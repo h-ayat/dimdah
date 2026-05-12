@@ -1,8 +1,8 @@
-# Domain-Isolated Modular Driver Architecture (DIMDAh) — Domain Tier
+# Domain-Isolated Modular Driven Architecture (DIMDAh) — Domain Tier
 
 ## Preface
 
-Modern software systems have grown increasingly complex while team sizes often remain small. With the rise of intelligent coding assistants and AI agents, developers can now build systems of unprecedented scale and sophistication — but the cognitive load of understanding and safely evolving such systems has become the new bottleneck. The **Domain-Isolated Modular Driver Architecture (DIMDAh)** aims to minimize this cognitive burden by introducing clear, enforceable boundaries between logical units of the system, allowing developers to modify, extend, or reason about a part of the system without understanding the entire codebase.
+Modern software systems have grown increasingly complex while team sizes often remain small. With the rise of intelligent coding assistants and AI agents, developers can now build systems of unprecedented scale and sophistication — but the cognitive load of understanding and safely evolving such systems has become the new bottleneck. The **Domain-Isolated Modular Driven Architecture (DIMDAh)** aims to minimize this cognitive burden by introducing clear, enforceable boundaries between logical units of the system, allowing developers to modify, extend, or reason about a part of the system without understanding the entire codebase.
 
 ### The Cognitive Load Problem
 
@@ -767,7 +767,7 @@ Consistent naming makes the architecture self-documenting.
 
 ## Summary
 
-The **Domain-Isolated Modular Driver Architecture (DIMDAh)** structures business logic into contexts governed by the **Strict Encapsulation Tree**. Access flows strictly upward through the tree; each layer knows only its children, not its parents or siblings.
+The **Domain-Isolated Modular Driven Architecture (DIMDAh)** structures business logic into contexts governed by the **Strict Encapsulation Tree**. Access flows strictly upward through the tree; each layer knows only its children, not its parents or siblings.
 
 ### The Four Layers and Their Rules
 
