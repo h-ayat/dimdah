@@ -71,13 +71,13 @@ This means:
 - Access flows strictly upward through the tree
 - No sibling access (two lobes cannot call each other directly)
 - No skip-level access (orch cannot reach into kernel directly, bypassing lobe)
-- The one exception: **Port** nodes are designed to be accessed across context boundaries — they are the public interface of a context
+- The one exception: **Port** and **Gate** nodes are designed to be accessed across context boundaries — Port (query interface) by any Lobe or Orch of another context; Gate (transaction interface) by Orchs of other contexts only
 
 The package hierarchy directly models this tree, and **package-private visibility modifiers** allow the compiler to enforce these rules structurally, not just by convention.
 
 ### Context
 
-A *context* is a bounded unit of domain responsibility. The Domain tier is composed of one or more contexts. Each context has four layers — Repo, Kernel, Lobe, and Orchestrator — plus a Port that serves as its public interface.
+A *context* is a bounded unit of domain responsibility. The Domain tier is composed of one or more contexts. Each context has four layers — Repo, Kernel, Lobe, and Orchestrator — plus a **Port** (query interface) and a **Gate** (transaction interface) that together form its public surface.
 
 The presence and grouping of these layers within a context form a **story**: one can navigate the package tree to understand which kernels a lobe owns, which repos a kernel manages, and what the context exposes to the outside world.
 
@@ -142,10 +142,10 @@ private[x] class XKernel(repo: XRepo) {
 - Can talk to its own Kernels
 - Can query **other contexts through their Ports** (for reading data to inform decisions)
 - **Cannot** directly access Repos
-- **Cannot** cause cross-context mutations as part of its own transaction — that is Orch's responsibility
+- **Cannot** call another context's Gate — cross-context mutations are Orch's responsibility
 - Can only be accessed by its context's Orch
 
-**Key principle**: A Lobe is where the *why* of business logic lives. It answers: "given the state of my kernels and the state of the world, what should happen?" It coordinates kernels to perform mutations and uses external Ports to gather the information it needs.
+**Key principle**: A Lobe is where the *why* of business logic lives. It answers: "given the state of my kernels and the state of the world, what should happen?" It coordinates kernels to perform mutations and uses external Ports to gather the information it needs. It never triggers mutations in another context directly.
 
 ```scala
 // XLobe.scala — private to the context package (accessible only by Orch)
@@ -162,49 +162,62 @@ private[context] class XLobe(kernel: XKernel, billingPort: BillingPort) {
 }
 ```
 
-### Orchestrator (Orch) and Port
+### Orchestrator (Orch), Port, and Gate
 
-**Port** is the public interface of a context. It defines what the context offers to the rest of the system. All access to a context from outside must go through its Port.
+A context exposes two public interfaces to the outside world:
 
-**Orch** implements the Port and has two responsibilities:
-1. **API surface**: Delegate Port method calls to the appropriate Lobes
+**Gate** is the **transaction interface**. It defines all operations that constitute a business transaction within the context's domain. Foreign context Lobes may not access Gate — only Orchs of other contexts (or the Interface tier) may call Gate methods.
+
+**Port** is the **query interface**. It exposes read-only operations that other contexts use to gather information. Both Lobes and Orchs of other contexts may access Port.
+
+**Orch** implements both Gate and Port and has two responsibilities:
+1. **API surface**: Delegate Gate and Port method calls to the appropriate Lobes
 2. **Cross-context transactions**: Coordinate operations across multiple contexts — e.g., compensating transactions, sagas — when a single business operation spans more than one context
 
 **Access rules**:
-- Orch implements Port (Port is public)
+- Orch implements both Gate and Port (both are public)
 - Orch can call Lobes within its context
 - Orch **cannot** call Kernels or Repos directly (this would bypass lobe-level business rules)
-- Orch can call other contexts' Ports for cross-context coordination
+- Orch can call other contexts' Gate and Port for cross-context coordination
+- Lobe can query other contexts' **Port** (read-only); Lobe **cannot** call another context's Gate
 
 ```scala
-// Port.scala — public
+// Port.scala — public (query interface)
 trait UserPort {
-  def registerWithPlan(email: String, pw: String, planId: PlanId): IO[RegistrationError, UserId]
   def getProfile(userId: UserId): IO[UserNotFound, UserProfile]
 }
 
-// Orch.scala — public (implements Port)
-class UserOrch(lobe: UserLobe) extends UserPort {
+// Gate.scala — public (transaction interface; foreign Lobes may not access)
+trait UserGate {
+  def registerWithPlan(email: String, pw: String, planId: PlanId): IO[RegistrationError, UserId]
+  def cancelPendingCheckout(userId: UserId): IO[UserNotFound, Unit]
+}
+
+// Orch.scala — public (implements both Port and Gate)
+class UserOrch(lobe: UserLobe) extends UserPort with UserGate {
+
+  def getProfile(userId: UserId) =
+    lobe.getProfile(userId)
 
   def registerWithPlan(email: String, pw: String, planId: PlanId) =
     lobe.registerWithPlan(email, pw, planId)
 
-  def getProfile(userId: UserId) =
-    lobe.getProfile(userId)
+  def cancelPendingCheckout(userId: UserId) =
+    lobe.cancelPendingCheckout(userId)
 }
 ```
 
-For cross-context transactions, a higher-level Orch coordinates across Ports:
+For cross-context transactions, a higher-level Orch coordinates across Gates and Ports:
 
 ```scala
-// CheckoutOrch — coordinates across context boundaries
-class CheckoutOrch(userPort: UserPort, orderPort: OrderPort) extends CheckoutPort {
+// CheckoutOrch — coordinates across context boundaries via Gate (mutations) and Port (reads)
+class CheckoutOrch(userPort: UserPort, userGate: UserGate, orderGate: OrderGate) extends CheckoutGate {
 
   def checkout(userId: UserId, items: List[Item]): IO[CheckoutError, OrderId] =
     for {
-      user    <- userPort.getProfile(userId)
-      orderId <- orderPort.placeOrder(user, items)
-        .onError(_ => userPort.cancelPendingCheckout(userId)) // compensating action
+      user    <- userPort.getProfile(userId)           // query via Port
+      orderId <- orderGate.placeOrder(user, items)     // mutate via Gate
+        .onError(_ => userGate.cancelPendingCheckout(userId)) // compensating action via Gate
     } yield orderId
 }
 ```
@@ -225,6 +238,58 @@ This is not a shortcut — it is a deliberate signal. The absence of a Lobe comm
 
 ---
 
+## Subcontexts
+
+A context may declare one or more **subcontexts** — bounded units of domain responsibility that are intentionally hidden from the rest of the system and controlled entirely within their parent context.
+
+All rules that apply to a regular context (Repo, Kernel, Lobe, Orch, Port, Gate, SET, layer collapsing) apply equally to a subcontext. The distinction lies solely in **access control**:
+
+- A subcontext **cannot be accessed by foreign contexts**. Only its parent context and its sibling subcontexts may use it.
+- A subcontext has both a **Port** (query interface) and a **Gate** (transaction interface).
+- The subcontext's **Port** may be accessed by its parent Orch, its parent's Lobes, and the Orchs and Lobes of sibling subcontexts.
+- The subcontext's **Gate** may be accessed only by its parent Orch and the Orchs of sibling subcontexts.
+
+**When to use a subcontext**: When a bounded unit of domain logic needs to be hidden from the outer world, and its access should be governed exclusively by the parent context. This is not a default decomposition strategy — use it deliberately, when control over exposure is the explicit goal.
+
+In Scala, subcontext visibility is enforced by scoping the subcontext's Port, Gate, and Orch to the parent context's package:
+
+```scala
+// sub-a/Port.scala — accessible only within the parent context package
+private[parentContext] trait SubAPort {
+  def getSummary(id: SubAId): IO[SubANotFound, SubASummary]
+}
+
+// sub-a/Gate.scala — accessible only within the parent context package
+private[parentContext] trait SubAGate {
+  def create(data: SubAData): IO[SubAError, SubAId]
+}
+
+// sub-a/Orch.scala — private to parent context
+private[parentContext] class SubAOrch(lobe: SubALobe) extends SubAPort with SubAGate {
+  def getSummary(id: SubAId) = lobe.getSummary(id)
+  def create(data: SubAData) = lobe.create(data)
+}
+```
+
+The parent context's Orch wires and controls the subcontext:
+
+```scala
+// parent-context/Orch.scala — public
+class ParentOrch(
+  lobe: ParentLobe,
+  subAOrch: SubAOrch    // injected; not exposed outside parent context
+) extends ParentPort with ParentGate {
+
+  def doSomething(id: SubAId): IO[ParentError, Result] =
+    for {
+      summary <- subAOrch.getSummary(id)    // query subcontext via its Port
+      result  <- lobe.process(summary)
+    } yield result
+}
+```
+
+---
+
 ## Error Handling
 
 > See [`error-handling.md`](./error-handling.md) for the full specification.
@@ -239,25 +304,33 @@ The package layout directly encodes the Strict Encapsulation Tree. Each level of
 
 ```
 context/
-  ├── Port.scala
-  ├── Orch.scala
-  └── lobes/
-      ├── x/
-      │   ├── XLobe.scala
-      │   └── kernels/
-      │       ├── XKernel.scala
-      │       └── XRepo.scala
-      └── y/
-          ├── YLobe.scala
-          └── kernels/
-              ├── a/
-              │   ├── AKernel.scala
-              │   └── repos/
-              │       ├── ARepo1.scala
-              │       └── ARepo2.scala
-              └── b/
-                  ├── BKernel.scala
-                  └── BRepo.scala
+  ├── Port.scala           ← public (query interface)
+  ├── Gate.scala           ← public (transaction interface; foreign Lobes cannot access)
+  ├── Orch.scala           ← public (implements Port and Gate)
+  ├── lobes/
+  │   ├── x/
+  │   │   ├── XLobe.scala
+  │   │   └── kernels/
+  │   │       ├── XKernel.scala
+  │   │       └── XRepo.scala
+  │   └── y/
+  │       ├── YLobe.scala
+  │       └── kernels/
+  │           ├── a/
+  │           │   ├── AKernel.scala
+  │           │   └── repos/
+  │           │       ├── ARepo1.scala
+  │           │       └── ARepo2.scala
+  │           └── b/
+  │               ├── BKernel.scala
+  │               └── BRepo.scala
+  └── subcontexts/         ← optional; only when hiding from the outer world
+      └── sub-a/
+          ├── Port.scala   ← private[context] (parent + sibling Lobes/Orchs only)
+          ├── Gate.scala   ← private[context] (parent + sibling Orchs only)
+          ├── Orch.scala   ← private[context]
+          └── lobes/
+              └── ...
 ```
 
 ### Visibility Enforcement in Scala
@@ -272,21 +345,26 @@ private[x] class XKernel(repo: XRepo) { ... }
 // XLobe.scala — only Orch can access this (private to the lobes package or context package)
 private[context] class XLobe(kernel: XKernel, externalPort: SomePort) { ... }
 
-// Port.scala — public interface of the context
+// Port.scala — public query interface of the context
 trait Port { ... }
 
-// Orch.scala — public (wired externally, implements Port)
-class Orch(xLobe: XLobe, yLobe: YLobe) extends Port { ... }
+// Gate.scala — public transaction interface; foreign Lobes may not access
+trait Gate { ... }
+
+// Orch.scala — public (wired externally, implements Port and Gate)
+class Orch(xLobe: XLobe, yLobe: YLobe) extends Port with Gate { ... }
 ```
 
 The compiler enforces:
 - Orch cannot instantiate or access `XKernel` or `XRepo` (package-private to `x`)
 - `XLobe` cannot access `XRepo` (package-private to `x`; lobe is in `lobes/x`, repo is in `lobes/x/kernels`)
-- External code can only depend on `Port` and `Orch` via dependency injection
+- External code can only depend on `Port`, `Gate`, and `Orch` via dependency injection
+- The Gate/Port discipline (Lobe may not call Gate of foreign context) is a convention enforced by code review or architectural tests, not the compiler
 
 ### What SET Rules the Compiler Cannot Enforce
 
 Some rules require code review or architectural tests:
+- Preventing Lobe from calling an external Gate (it may only query via Port)
 - Preventing Lobe from performing mutations through an external Port (it may only query)
 - Ensuring Orch does not embed business logic (only delegation and transaction coordination)
 - Maintaining context isolation when language module systems are weak
@@ -301,7 +379,8 @@ Use tools like **ArchUnit**, **dependency analyzers**, or custom linters to enfo
 
 ### Encapsulation via Visibility Scopes
 
-- **Port** is public — it is the only surface area of a context
+- **Port** is public — the query surface of a context; accessible by any foreign Lobe or Orch
+- **Gate** is public — the transaction surface of a context; accessible only by foreign Orchs (and the Interface tier), not Lobes
 - **Orch** is public — but only ever injected/wired, never directly instantiated by consumers
 - **Lobe** is package-private — accessible only within the context package (by Orch)
 - **Kernel** is package-private — accessible only within the lobe's package
@@ -638,11 +717,12 @@ Consistent naming makes the architecture self-documenting.
 - Pattern: `<Domain>Lobe`
 - Examples: `UserLobe`, `CheckoutLobe`, `FulfillmentLobe`
 
-### Port and Orch
+### Port, Gate, and Orch
 
-- Port: `<Context>Port` or just `Port` when inside the context package
+- Port (query interface): `<Context>Port` or just `Port` when inside the context package
+- Gate (transaction interface): `<Context>Gate` or just `Gate` when inside the context package
 - Orch: `<Context>Orch` or `Orch`
-- Examples: `UserPort`, `UserOrch`, `CheckoutPort`, `CheckoutOrch`
+- Examples: `UserPort`, `UserGate`, `UserOrch`, `CheckoutPort`, `CheckoutGate`, `CheckoutOrch`
 
 ### Domain Errors
 
@@ -695,10 +775,10 @@ The **Domain-Isolated Modular Driver Architecture (DIMDAh)** structures business
 |-------|-----------|---------------|-------------|
 | **Repo** | Database | Anything else | Owner Kernel only |
 | **Kernel** | Own Repos | Other Kernels, Lobes, Ports | Owner Lobe (or Orch if collapsed) |
-| **Lobe** | Own Kernels, external Ports (read) | Repos, cross-context mutations | Context Orch |
-| **Orch** | Own Lobes, external Ports | Own Kernels, Repos | Interface tier, other Orchs |
+| **Lobe** | Own Kernels; external **Ports** (read) | Repos; external Gates; cross-context mutations | Context Orch |
+| **Orch** | Own Lobes; external Ports and Gates | Own Kernels, Repos | Interface tier; other Orchs |
 
-**Port** is the sole public surface of a context. All external access goes through Port.
+**Port** (query) and **Gate** (transaction) are the two public surfaces of a context. All external access goes through one of them. Lobes may only call foreign **Port**s — never foreign **Gate**s.
 
 ### Core Tenets
 
@@ -726,7 +806,7 @@ May be overkill for:
 ### Adoption Steps
 
 1. **Identify your contexts** — Map business capabilities to bounded contexts
-2. **Define Ports first** — What does each context expose to the world?
+2. **Define Ports and Gates first** — What queries does each context expose (Port)? What transactions does it expose (Gate)?
 3. **Implement Kernels** — Start with pure invariant logic and repos
 4. **Add Lobes when logic requires** — Introduce the layer when cross-kernel coordination or external queries are needed
 5. **Wire via Orch** — Implement Ports, introduce cross-context transactions as requirements emerge
@@ -745,59 +825,64 @@ DIMDAh is a living architecture — adapt it to your context while preserving th
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  Context A                                               │   │
 │  │                                                          │   │
-│  │  ┌──────────┐    ┌──────────────────────────────────┐   │   │
-│  │  │   Port   │◄───│             Orch                 │   │   │
-│  │  │ (public) │    │  (implements Port, manages txns) │   │   │
-│  │  └──────────┘    └──────────────┬───────────────────┘   │   │
-│  │                                 │ calls                  │   │
-│  │                  ┌──────────────▼───────────────────┐   │   │
-│  │                  │           Lobe X                  │   │   │
-│  │                  │  (decision making, business rules)│   │   │
-│  │                  │  may query other contexts via Port│   │   │
-│  │                  └──────────┬────────────────────────┘   │   │
-│  │                             │ calls                       │   │
-│  │                  ┌──────────▼────────────────────────┐   │   │
-│  │                  │          Kernel X                  │   │   │
-│  │                  │  (internal consistency, invariants)│   │   │
-│  │                  └──────────┬────────────────────────┘   │   │
-│  │                             │ calls                       │   │
-│  │                  ┌──────────▼────────────────────────┐   │   │
-│  │                  │           Repo X                   │   │   │
-│  │                  │  (persistence, DB-level models)    │   │   │
-│  │                  └──────────┬────────────────────────┘   │   │
-│  │                             │                             │   │
-│  └─────────────────────────────┼─────────────────────────── ┘   │
-│                                │ reads/writes                    │
-│                       ┌────────▼────────┐                       │
-│                       │    Database     │                       │
-│                       └─────────────────┘                       │
+│  │  ┌──────────┐ ┌──────────┐  ┌──────────────────────┐   │   │
+│  │  │   Port   │ │   Gate   │◄─│         Orch         │   │   │
+│  │  │ (query)  │ │  (txns)  │  │ (implements Port+Gate│   │   │
+│  │  └──────────┘ └──────────┘  │  manages cross-ctx   │   │   │
+│  │       ▲            ▲        │       txns)          │   │   │
+│  │       │            │        └──────────┬───────────┘   │   │
+│  │   any Lobe/    Orch only               │ calls         │   │
+│  │   Orch only    (no foreign             │               │   │
+│  │                 Lobes)                 │               │   │
+│  │                  ┌─────────────────────▼───────────┐   │   │
+│  │                  │           Lobe X                 │   │   │
+│  │                  │  (decision making, business rules│   │   │
+│  │                  │  queries other Ports only)       │   │   │
+│  │                  └──────────┬──────────────────────┘   │   │
+│  │                             │ calls                      │   │
+│  │                  ┌──────────▼──────────────────────┐   │   │
+│  │                  │          Kernel X                │   │   │
+│  │                  │  (invariants, aggregate rules)   │   │   │
+│  │                  └──────────┬──────────────────────┘   │   │
+│  │                             │ calls                      │   │
+│  │                  ┌──────────▼──────────────────────┐   │   │
+│  │                  │           Repo X                 │   │   │
+│  │                  │  (persistence, DB-level models)  │   │   │
+│  │                  └──────────┬──────────────────────┘   │   │
+│  │                             │                            │   │
+│  └─────────────────────────────┼────────────────────────── ┘   │
+│                                │ reads/writes                   │
+│                       ┌────────▼────────┐                      │
+│                       │    Database     │                      │
+│                       └─────────────────┘                      │
 │                                                                 │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  Context B                                               │   │
-│  │  ┌──────────┐    ┌──────────────────────────────────┐   │   │
-│  │  │   Port   │◄───│             Orch                 │   │   │
-│  │  └──────────┘    └──────────────────────────────────┘   │   │
-│  │       ▲                      │                           │   │
-│  └───────┼──────────────────────┼───────────────────────────┘   │
-│          │ Port.getPlan()        │                               │
-│          └──── Lobe X queries ──┘                               │
-│               Context B's Port                                  │
-│               for read-only data                                │
+│  │  ┌──────────┐ ┌──────────┐  ┌──────────────────────┐   │   │
+│  │  │   Port   │ │   Gate   │◄─│         Orch         │   │   │
+│  │  └──────────┘ └──────────┘  └──────────────────────┘   │   │
+│  │       ▲                                 │               │   │
+│  └───────┼─────────────────────────────────┼───────────────┘   │
+│          │ Port.getPlan()                   │                   │
+│          └──── Lobe X (Context A) queries ─┘                   │
+│               Context B's Port (read-only)                     │
 └─────────────────────────────────────────────────────────────────┘
 
 
 Layer Access Rules (Strict Encapsulation Tree):
 ═══════════════════════════════════════════════
 
-  Port ◄── (Interface tier, other Orch)
+  Port ◄── any foreign Lobe or Orch (read/query only)
+  Gate ◄── foreign Orchs only (no foreign Lobes)
     │
   Orch ──► Lobe  [cannot reach Kernel or Repo]
-              │
-           Kernel ──► Repo  [cannot reach outside; Repo cannot reach outside]
-                         │
-                      Database
+    │         │
+    │      Kernel ──► Repo ──► Database
+    │
+  (for cross-ctx txns) ──► other Context's Gate
+  (for cross-ctx reads) ──► other Context's Port
 
-  Lobe may also query: ──► other Context's Port (read-only)
+  Lobe may also: ──► other Context's Port (read-only, never Gate)
 
   Event Flow (Cross-Context):
   ═══════════════════════════
@@ -818,7 +903,7 @@ Layer Access Rules (Strict Encapsulation Tree):
 **1. Request Processing (Top-Down)**:
 ```
 Interface tier
-  → Port (context boundary)
+  → Gate or Port (context boundary)
     → Orch (delegates, manages cross-context txns)
       → Lobe (business rules, coordinates kernels)
         → Kernel (invariant enforcement)
@@ -829,7 +914,7 @@ Interface tier
 **2. Cross-Context Read (Lobe queries external Port)**:
 ```
 Lobe X (Context A)
-  → Context B's Port (read query)
+  → Context B's Port (read query — never Gate)
     → Context B's Orch
       → Context B's Lobe
         → Context B's Kernel
@@ -839,10 +924,10 @@ Lobe X (Context A)
 **3. Cross-Context Transaction (Orch-managed Saga)**:
 ```
 CheckoutOrch
-  → UserPort.getProfile()          [read]
-  → InventoryPort.reserve()        [mutate — step 1]
-  → PaymentPort.charge()           [mutate — step 2; compensates step 1 on failure]
-  → OrderPort.create()             [mutate — step 3; compensates steps 1 & 2 on failure]
+  → UserPort.getProfile()          [read via Port]
+  → InventoryGate.reserve()        [mutate via Gate — step 1]
+  → PaymentGate.charge()           [mutate via Gate — step 2; compensates step 1 on failure]
+  → OrderGate.create()             [mutate via Gate — step 3; compensates steps 1 & 2 on failure]
 ```
 
 **4. Collapsed Layers (no Lobe-level logic)**:

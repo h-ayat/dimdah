@@ -41,7 +41,7 @@ The Domain tier is a **tree of packages**. The rule:
 
 - No sibling access (lobes cannot call each other)
 - No skip-level access (Orch cannot reach Kernel directly, bypassing Lobe)
-- **Exception**: Port nodes are designed to be accessed from outside the context — they are the public surface
+- **Exception**: Port and Gate nodes are designed to be accessed from outside the context — Port (query) by any foreign Lobe or Orch; Gate (transaction) by foreign Orchs only
 
 Enforced via **package-private visibility modifiers** at each level.
 
@@ -65,16 +65,17 @@ Each context in the Domain tier has four layers:
 
 ### Lobe
 - **Does**: Decision-making and business rules. Coordinates Kernels. Queries external context Ports for data.
-- **Can access**: Its own Kernels; other contexts' Ports (read/query only)
-- **Cannot**: Access Repos directly; cause cross-context mutations (that's Orch's job)
+- **Can access**: Its own Kernels; other contexts' **Ports** (read/query only)
+- **Cannot**: Access Repos directly; call another context's Gate; cause cross-context mutations (that's Orch's job)
 - **Visibility**: Package-private to the context (Orch only)
 
-### Orch + Port
-- **Port**: Public interface of the context. Sealed contract. All external access goes through Port.
-- **Orch**: Implements Port. Delegates to Lobes. Manages cross-context transactions (Sagas).
-- **Can access**: Its own Lobes; other contexts' Ports
+### Orch + Port + Gate
+- **Port**: Public **query** interface of the context. Exposes read-only operations. Accessible by any foreign Lobe or Orch.
+- **Gate**: Public **transaction** interface of the context. Exposes business transaction operations. Accessible by foreign Orchs only — never by foreign Lobes.
+- **Orch**: Implements both Port and Gate. Delegates to Lobes. Manages cross-context transactions (Sagas).
+- **Can access**: Its own Lobes; other contexts' Ports and Gates
 - **Cannot**: Access own Kernels or Repos directly
-- **Visibility**: Port and Orch are public
+- **Visibility**: Port, Gate, and Orch are public
 
 ### Layer Collapsing
 
@@ -90,8 +91,11 @@ As soon as Lobe-level logic appears, reintroduce the Lobe, make Kernel package-p
 |-------|-----------|---------------|-------------|
 | **Repo** | Database | Anything else | Owner Kernel only |
 | **Kernel** | Own Repos | Other Kernels, Lobes, Ports | Owner Lobe (or Orch if collapsed) |
-| **Lobe** | Own Kernels; external Ports (read) | Repos; cross-context mutations | Context Orch |
-| **Orch** | Own Lobes; external Ports | Own Kernels, Repos | Interface tier; other Orchs |
+| **Lobe** | Own Kernels; external **Ports** (read) | Repos; external **Gates**; cross-context mutations | Context Orch |
+| **Orch** | Own Lobes; external Ports and **Gates** | Own Kernels, Repos | Interface tier; other Orchs |
+
+**Port** = query interface (foreign Lobes and Orchs may call)
+**Gate** = transaction interface (foreign Orchs only — never foreign Lobes)
 
 ---
 
@@ -100,20 +104,22 @@ As soon as Lobe-level logic appears, reintroduce the Lobe, make Kernel package-p
 ```
 Interface tier
     │
-  Port (context boundary — public)
+  Port (query — public) or Gate (transaction — public)
     │
   Orch ──► own Lobes ──► own Kernels ──► own Repos ──► DB
     │
-  other context Ports (for reads or cross-context coordination)
+  other context Ports (reads)
+  other context Gates (cross-context mutations — Orch only)
 
 All tiers ──► Infrastructure (abstractions only)
 ```
 
 **NEVER**:
 - Orch accessing Kernel or Repo directly (bypasses business rules)
+- Lobe calling another context's Gate (only Orch may trigger cross-context transactions)
 - Lobe mutating another context's state (use events or let Orch orchestrate)
 - Lobe accessing Repo directly (bypasses Kernel invariants)
-- Port leaking internal model types (Kernel/Repo-level)
+- Port or Gate leaking internal model types (Kernel/Repo-level)
 - Business logic in the Interface tier
 
 ---
@@ -198,25 +204,33 @@ Cross-context transactions are **always managed by Orch**, never by Lobe.
 
 ```
 context/
-  ├── Port.scala           ← public
-  ├── Orch.scala           ← public (implements Port)
-  └── lobes/
-      ├── x/
-      │   ├── XLobe.scala                  ← private[context]
-      │   └── kernels/
-      │       ├── XKernel.scala            ← private[x]
-      │       └── XRepo.scala              ← private[x]
-      └── y/
-          ├── YLobe.scala                  ← private[context]
-          └── kernels/
-              ├── a/
-              │   ├── AKernel.scala        ← private[y]
-              │   └── repos/
-              │       ├── ARepo1.scala     ← private[a]
-              │       └── ARepo2.scala     ← private[a]
-              └── b/
-                  ├── BKernel.scala        ← private[y]
-                  └── BRepo.scala          ← private[b]
+  ├── Port.scala           ← public (query interface)
+  ├── Gate.scala           ← public (transaction interface; foreign Lobes cannot access)
+  ├── Orch.scala           ← public (implements Port and Gate)
+  ├── lobes/
+  │   ├── x/
+  │   │   ├── XLobe.scala                  ← private[context]
+  │   │   └── kernels/
+  │   │       ├── XKernel.scala            ← private[x]
+  │   │       └── XRepo.scala              ← private[x]
+  │   └── y/
+  │       ├── YLobe.scala                  ← private[context]
+  │       └── kernels/
+  │           ├── a/
+  │           │   ├── AKernel.scala        ← private[y]
+  │           │   └── repos/
+  │           │       ├── ARepo1.scala     ← private[a]
+  │           │       └── ARepo2.scala     ← private[a]
+  │           └── b/
+  │               ├── BKernel.scala        ← private[y]
+  │               └── BRepo.scala          ← private[b]
+  └── subcontexts/         ← optional; for units hidden from the outer world
+      └── sub-a/
+          ├── Port.scala   ← private[context] (parent + sibling Lobes/Orchs only)
+          ├── Gate.scala   ← private[context] (parent + sibling Orchs only)
+          ├── Orch.scala   ← private[context]
+          └── lobes/
+              └── ...
 ```
 
 ---
@@ -225,7 +239,8 @@ context/
 
 | Component | Pattern | Examples |
 |-----------|---------|---------|
-| Port | `<Context>Port` or `Port` (within package) | `UserPort`, `CheckoutPort` |
+| Port (query) | `<Context>Port` or `Port` (within package) | `UserPort`, `CheckoutPort` |
+| Gate (transaction) | `<Context>Gate` or `Gate` (within package) | `UserGate`, `CheckoutGate` |
 | Orch | `<Context>Orch` or `Orch` | `UserOrch`, `CheckoutOrch` |
 | Lobe | `<Domain>Lobe` | `UserLobe`, `CheckoutLobe` |
 | Kernel | `<Domain>Kernel` | `UserKernel`, `AccountKernel` |
@@ -267,18 +282,35 @@ context/
 
 ---
 
+## Subcontexts
+
+A **subcontext** is a context nested inside another context, hidden from the outside world. All SET rules apply equally. The distinction is access control:
+
+- A subcontext is **not accessible by foreign contexts** — only its parent and sibling subcontexts.
+- A subcontext has both Port (query) and Gate (transaction).
+- The subcontext's **Port** is accessible by parent and sibling Orchs and Lobes.
+- The subcontext's **Gate** is accessible only by parent and sibling Orchs.
+
+**When to use**: When a bounded unit of domain logic must be hidden from the outer world and its access controlled entirely within the parent context.
+
+In Scala, enforce via `private[parentContextPackage]` on the subcontext's Port, Gate, and Orch.
+
+---
+
 ## Common Anti-Patterns
 
 | Anti-pattern | Why it's wrong | Fix |
 |---|---|---|
 | Orch calling Kernel directly (when Lobe exists) | Bypasses Lobe business rules | Orch → Lobe → Kernel |
 | Lobe accessing Repo | Bypasses Kernel invariants | Lobe → Kernel → Repo |
-| Lobe mutating another context | Breaks cross-context isolation | Emit event or delegate to Orch |
-| Port exposing Kernel/Repo types | Leaks internals | Define Port-level types |
+| Lobe calling another context's Gate | Cross-context mutations belong to Orch | Delegate to Orch or emit event |
+| Lobe mutating another context via Port | Port is query-only | Emit event or delegate to Orch |
+| Port or Gate exposing Kernel/Repo types | Leaks internals | Define Port/Gate-level types |
 | Using exceptions for domain errors | Callers can't handle exhaustively | Use `IO[E, A]` with sealed ADT |
 | Shared mutable state between Kernels | Creates hidden coupling | Each Kernel owns its Repos |
 | Business logic in Interface tier | Protocol and domain coupled | Move logic to Lobe |
 | Generic error types (`String`, `Throwable`) | Non-exhaustive handling | Use sealed ADT per domain |
+| Foreign context accessing subcontext directly | Violates subcontext isolation | Route through parent context's Port or Gate |
 
 ---
 
@@ -292,6 +324,12 @@ context/
 
 **Is it a business decision requiring data from outside the context, or coordinating multiple Kernels?**
 → **Lobe**
+
+**Is it a read-only operation exposed to other contexts?**
+→ **Port** (query interface)
+
+**Is it a business transaction exposed to other contexts?**
+→ **Gate** (transaction interface)
 
 **Is it implementing the context's public API or managing a cross-context transaction?**
 → **Orch**
@@ -307,13 +345,15 @@ context/
 ## Code Review Checklist
 
 - [ ] Each layer accesses only what SET permits (see access rules table)
+- [ ] Lobes call only foreign **Ports** (queries) — never foreign **Gates** (transactions)
+- [ ] Cross-context mutations are managed by Orch, not Lobe
 - [ ] Port error types are public sealed ADTs; Kernel/Lobe errors are package-private
 - [ ] Inner layer errors are translated at each boundary — not propagated raw
-- [ ] Orch manages all cross-context transactions; Lobe does not mutate other contexts
 - [ ] Events are past tense and immutable; handlers are idempotent
 - [ ] DB-level model types do not appear outside the Repo
-- [ ] Port-exposed models are distinct from internal models
+- [ ] Port/Gate-exposed models are distinct from internal models
+- [ ] Subcontexts are not accessed by foreign contexts (scoped to parent package)
 - [ ] No business logic in Interface tier
 - [ ] Technical exceptions not used for domain outcomes
 - [ ] Layer collapsing (Lobe omitted) is justified — no Lobe-level logic exists yet
-- [ ] Naming follows conventions (Repo, Kernel, Lobe, Orch, Port suffixes)
+- [ ] Naming follows conventions (Repo, Kernel, Lobe, Orch, Port, Gate suffixes)
